@@ -20,7 +20,7 @@ Full PGD database.
 - ≤ 0.3 R-free
 
 ```{r}
-full = read_delim("pgd_all.tsv", skip = 4, delim="\t")
+full = read_delim("pgd_all.tsv.gz", skip = 4, delim="\t")
 pgd.all = full %>% transmute(Match, Code, ID, `Chain ID`, AA=as.factor(AA), ss=as.factor(ss), phi, psi) %>%
     mutate(phi=wrap.phi(phi), psi=wrap.psi(psi))
 remove(full)

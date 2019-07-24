@@ -19,7 +19,7 @@ source("ramachandran_helpers.R")
 ```{r, message=F, warning=F, cache=T, include=F}
 # Load data
 if(!exists("pgd.all")) {
-  full = read_delim("pgd_all.tsv", skip = 4, delim="\t", col_types = cols_only(
+  full = read_delim("pgd_all.tsv.gz", skip = 4, delim="\t", col_types = cols_only(
     Match="i", Code="c", ID="c", `Chain ID`="c",
     AA="f", ss="f", phi="d", psi="d"
   ))
