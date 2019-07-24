@@ -1,0 +1,205 @@
+---
+title: "Ramachandran plots with Gaussian Mixture Models"
+csl: plos-computational-biology.csl
+date: "`r Sys.Date()`"
+echo: no
+output:
+  bookdown::pdf_document2
+bibliography: bibliography.bib
+---
+```{r, include=F, message=F}
+knitr::opts_chunk$set(echo=FALSE, cache=TRUE, dpi=300, out.width="50%", fig.align = 'center')
+
+# Initial functions
+require(tidyverse)
+require(magrittr)
+
+source("ramachandran_helpers.R")
+```
+```{r, message=F, warning=F, cache=T, include=F}
+# Load data
+if(!exists("pgd.all")) {
+  full = read_delim("pgd_all.tsv", skip = 4, delim="\t", col_types = cols_only(
+    Match="i", Code="c", ID="c", `Chain ID`="c",
+    AA="f", ss="f", phi="d", psi="d"
+  ))
+  pgd.all = full %>% transmute(Match, Code, ID, `Chain ID`, AA, ss, phi, psi) %>%
+    mutate(phi=wrap.phi(phi), psi=wrap.psi(psi))
+
+  remove(full)
+}
+initial.gmm = loadGMM("initial.model.tsv")
+initial.gmm$posterior = pgd.all %>% select(phi,psi) %>% mvnormalmix.posterior(initial.gmm)
+
+initial.centroids = do.call(rbind, initial.gmm$mu) %>%
+  as.data.frame() %>%
+  transmute(Name=initial.gmm$name, phi=mu1, psi=mu2)
+```
+
+# Aim
+
+Our goal is to identify kinks in alpha-helices and compare helices from different structures. For this we want a metric that captures how "helix-like" a particular residue is as we travel along the helix.
+
+A simple way to analyze this is just to look at the $\phi$ and $\psi$ angles along the backbone. Alpha helices are known to have restricted conformations, with the majority of residues clustered around about (-300,-40).
+
+Although we sometimes don't think of it as such, a Ramachandran plot is actually a 2D histogram, where the z axis corresponds to the probability of finding a residue with that $(\phi,\psi)$ pair.
+
+!["Geo-style 3D Ramachandran plot" from Hollingsworth and Karplus [@Hollingsworth:2010hk]](hollingsworth_fig6c.png)
+
+So, the "helixness" of a residue is something like it's distance to that central peak. Note that this ignores other possible indicators of the kink, such as disruptions to the hydrogen bonding network.
+
+
+# Gaussian Mixture Model
+
+To approximate the density of points in the Ramachandran plot we approximate it with a gaussian mixture model (GMM). This fits a set of 2D gaussians to the plot which together sum to the density at each point. This is convenient, because we can then interpret each component gaussian as a type of secondary structure.
+
+To fit the model, $\phi/\psi$ angle for `r nrow(pgd.all)` residues were downloaded from the Protein Geometry Database [@Berkholz:2010js]. This contains residues from high-quality structures ($\leq 1.2$\AA resolution, $\leq 0.25$ R-factor, $\leq 0.3$ R-free). PGD 1.0.2 was used.
+
+Fig \@ref(fig:initialclassifications) shows the data, labelled with the secondary structure classifications suggested in [@Hollingsworth:2010hk]. We will use these as the starting point for our model.
+
+(ref:initialclassifications) **Initial Classifications**. Initial rough classes based on [@Hollingsworth:2010hk]
+
+```{r initialclassifications, dev='png', fig.cap="(ref:initialclassifications)"}
+
+pgd.all %>%
+  showClasses(initial.gmm)
+```
+
+We reduce the number of classes somewhat (mostly for performance, but also because minor classes are poorly constrained and make it harder to converge). Then we run some iterations of GNN with a subset of the data to get some rough classes (Fig \@ref(fig:firstround)).
+
+(ref:firstround) **First round classifications**. Classes after training with a subset of residues.
+
+```{r firstround, cache=T, dev='png', fig.cap="(ref:firstround)"} 
+if(!exists("gmm.small")) { gmm.small = loadGMM("model_10000.tsv") }
+if(is.null(gmm.small$x)) {
+  gmm.small$x = pgd.all %>% sample_n(10000) %>% select(phi, psi) # minor fib: different sample
+  gmm.small$posterior = mvnormalmix.posterior(gmm.small$x, gmm.small)
+}
+showClasses(gmm.small$x, gmm.small)
+```
+
+Now expand to the full dataset and do additional training (Fig \@ref(fig:fullclassifications)).
+
+(ref:fullclassifications) **Final round classifications.** Classes after training with all points (but stopped before convergence).
+
+```{r fullclassifications, cache=T, dev='png', fig.cap="(ref:fullclassifications)"}
+if(!exists("gmm.full")) { gmm.full = loadGMM("model_full.tsv") }
+if(is.null(gmm.full$x)) {
+  gmm.full$x = pgd.all %>% select(phi, psi)
+  gmm.full$posterior = mvnormalmix.posterior(gmm.full$x, gmm.full)
+}
+
+alpha.i = which(gmm.full$name == "alpha")
+alpha.mu = gmm.full$mu[[alpha.i]]
+alpha.sigma = gmm.full$sigma[[alpha.i]]
+alpha.lambda = gmm.full$lambda[[alpha.i]]
+
+showClasses(gmm.full$x, gmm.full)
+```
+
+There are a few indicators that this is not a great model of Ramachandran space. The classes have changed significantly from the first round (particularly $P_{II}'$), and the likelihood had not yet converged during training. In our case this suggests that we don't have enough gaussians to accurately model the non-gaussian tails of the density. Even well-populated gegions like $\delta'$ have some empty regions, indicating that a single gaussian might not be a good fit for those. However, the $\alpha$ region that we're particularly interested in are fairly stable and well-fit, so I won't extend the training further.
+
+# Measuring "helix-ness"
+
+With this we can measure how helix-like a particular $(\phi,\psi)$ measurement is. Let's just consider the $\alpha$ region. The probability density in this region is given by
+
+```{r fewdigits,include=F}
+options(digits = 2)
+```
+
+
+$$
+\begin{aligned}
+p(x\in \mathbb{R}^k) &=  \frac{\lambda}{\sqrt{(2\pi)^k \left| \Sigma \right| }}
+  \exp{ \left( -\frac{1}{2} \left( x - \mu \right)^T \Sigma^{-1} \left( x - \mu \right)
+  \right)
+  } \\
+p_{\alpha}(\phi,\psi) &= \frac{\lambda_\alpha}{\sqrt{(2\pi)^2 ( \sigma_\phi \sigma_\psi - \sigma_{\phi \psi}^2) }}
+  \exp{  \left( -\frac{\sigma_{\phi} (\phi-\mu_\phi)^2
+      - 2 \sigma_{\phi \psi} (\phi-\mu_\phi)(\psi-\mu_\psi)
+      + \sigma_{\psi}(\psi-\mu_\psi)^2
+    }{2( \sigma_\phi \sigma_\psi - \sigma_{\phi \psi}^2)}
+  \right)
+  } \\
+  &= \frac{`r alpha.lambda`}{`r sqrt((2*pi)^2 * det(alpha.sigma) )` }
+  \exp{ \left( -\frac{ `r alpha.sigma[1,1]` (\phi-`r alpha.mu[1]`)^2
+      + `r -2 * alpha.sigma[1,2]` (\phi-`r alpha.mu[1]`)(\psi+`r -alpha.mu[2]`)
+      + `r alpha.sigma[2,2]` (\psi+`r -alpha.mu[2]`)^2
+    }{`r 2*det(alpha.sigma)`}
+  \right)
+  }
+\end{aligned}
+$$
+
+If desired, this can be added to $\delta$ probability to include the full region:
+
+```{r deltas}
+delta.i = which(gmm.full$name == "delta")
+delta.mu = gmm.full$mu[[delta.i]]
+delta.sigma = gmm.full$sigma[[delta.i]]
+delta.lambda = gmm.full$lambda[[delta.i]]
+```
+
+$$
+\begin{aligned}
+p_{\delta}(\phi,\psi)
+  &= \frac{`r delta.lambda`}{`r sqrt((2*pi)^2 * det(delta.sigma) )` }
+  \exp{ \left( \frac{ `r delta.sigma[1,1]` (\phi-`r delta.mu[1]`)^2
+      + `r -2 * delta.sigma[1,2]` (\phi-`r delta.mu[1]`)(\psi+`r -delta.mu[2]`)
+      + `r delta.sigma[2,2]` (\psi+`r -delta.mu[2]`)^2
+    }{`r 2*det(delta.sigma)`}
+  \right)
+  }
+\end{aligned}
+$$
+
+
+The dataset includes secondary structure assignments, using DSSP codes:
+- G = 3-turn helix ($3_{10}$ helix). Min length 3 residues.
+- H = 4-turn helix ($\alpha$ helix). Minimum length 4 residues.
+- I = 5-turn helix ($\pi$ helix). Minimum length 5 residues.
+- T = hydrogen bonded turn (3, 4 or 5 turn)
+- E = extended strand in parallel and/or anti-parallel $\beta$-sheet conformation. Min length 2 residues.
+- B = residue in isolated $\beta$-bridge (single pair $\beta$-sheet hydrogen bond formation)
+- S = bend (the only non-hydrogen-bond based assignment).
+- C = coil (residues which are not in any of the above conformations).
+
+Here is the $p_\alpha$ distribution by secondary structure using only $p_\alpha$:
+
+(ref:alphass) "**Alpha Probability by secondary structure annotation**")
+
+```{r alphass}
+# integrated probability over region
+pgd.all %>%
+  mutate(prob_helix=gmm.full$posterior[,alpha.i]) %>%
+  ggplot(aes(x=prob_helix, fill=ss)) +
+  geom_histogram(aes(y=..density..), bins=30) +
+  ggtitle("Alpha Probability by secondary structure annotation")
+```
+
+And here's the larger $p_\delta$ region:
+
+(ref:deltass) **Delta Probability by secondary structure annotation**
+
+```{r deltass}
+# integrated probability over region
+#pmvnorm(upper=c(300,-50), mean=alpha.mu, sigma=alpha.sigma)
+pgd.all %>%
+  mutate(prob_helix=gmm.full$posterior[,gmm.full$name == "delta"]) %>%
+  #filter(ss=="H") %>%
+  #sample_n(10) %>%
+  #select(prob_helix) %>%
+  ggplot(aes(x=prob_helix, fill=ss)) +
+  geom_histogram(aes(y=..density..), bins=30) +
+  ggtitle("Delta Probability by secondary structure annotation")
+```
+
+So we see that $p_\alpha$ is targetting tightly the canonical $\alpha$ helix, while $p_\delta$ covers $3_{10}$ and $\pi$ helices, as well as some turn residues. On the other hand, a few G and I residues are not contained in either the $\alpha$ or $\delta$ regions of the Ramachandran plot, indicating that hydrogen-bonding patterns provide more (or at least different) information than just looking at backbone angles.
+
+# Conclusion
+
+In summary, using $p_\alpha$ is probably a good metric for similarity to canonical $\alpha$ helices. Combining this with $p_\delta$ will include other types of helix, and may be more tolerant to bends, helix caps, etc. Either metric can be easily computed based on the $(\phi,\psi)$ angles.
+
+
+# References
+

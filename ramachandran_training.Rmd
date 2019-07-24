@@ -1,0 +1,295 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+require(tidyverse)
+require(magrittr)
+require(mixtools)  #GNN
+#require(class) #kNN
+require(mvtnorm) # MV norm distribution
+
+source("ramachandran_helpers.R")
+```
+
+Full PGD database.
+- PGD 1.0.2
+- ≤ 1.2Å resolution
+- ≤ 0.25 R-factor
+- ≤ 0.3 R-free
+
+```{r}
+full = read_delim("pgd_all.tsv", skip = 4, delim="\t")
+pgd.all = full %>% transmute(Match, Code, ID, `Chain ID`, AA=as.factor(AA), ss=as.factor(ss), phi, psi) %>%
+    mutate(phi=wrap.phi(phi), psi=wrap.psi(psi))
+remove(full)
+pgd.all
+```
+```{r}
+pgd.all %>% ggplot() +
+  geom_histogram(aes(x=ss), stat="count")
+```
+
+```{r}
+ggplot(pgd.all, aes(x=phi, y=psi)) +
+  geom_hex(bins=50) +
+  scale_fill_gradient(name = "count", trans = "log")
+```
+```{r}
+ggplot(pgd.all , aes(x=phi, y=psi)) +
+  xlim(-180,180) +
+  ylim(-180,180) +
+  scale_fill_gradient(name = "count", trans = "log") +
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", colour="white")
+```
+
+```{r}
+pgd.all %>%
+  #filter(AA!="Gly") %>%
+  transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)) %>%
+  ggplot(aes(x=phi, y=psi)) +
+  #xlim(-10,370) + ylim(-110,270) +
+  ggtitle("Initial classes") +
+  #scale_fill_distiller(palette= "Spectral", direction=-1, trans = "log") +
+  scale_fill_distiller(palette= "Spectral", direction=-1) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE)
+```
+
+
+```{r}
+ggplot(pgd.all %>% transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)), aes(x=phi, y=psi)) +
+  geom_hex(bins=50) +
+  ggtitle("All SS")
+  scale_fill_gradient(name = "count", trans = "log")
+```
+
+
+```{r}
+pgd.all %>%
+  filter(ss=="H") %>%
+  transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)) %>%
+  ggplot(aes(x=phi, y=psi)) +
+  xlim(-10,370) + ylim(-110,270) +
+  geom_hex(bins=50) +
+  ggtitle("Helix") +
+  scale_fill_gradient(name = "count", trans = "log")
+```
+
+```{r}
+pgd.all %>%
+  filter(ss=="E") %>%
+  transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)) %>%
+  ggplot(aes(x=phi, y=psi)) +
+  xlim(-10,370) + ylim(-110,270) +
+  geom_hex(bins=50) +
+  ggtitle("Sheet") +
+  scale_fill_gradient(name = "count", trans = "log")
+```
+
+
+initial parameters from the 9-class classification by Hollingsworth and Karplus.
+
+```{r, eval=F, include=F}
+# Very first initialization attempt
+# epsilon   130 170
+initial.centroids = read.table(textConnection(
+"Name phi psi
+delta~\"'\"    80  15
+P[II]~\"'\"      60  220
+gamma     85  -60
+zeta      230 75
+beta      230 140
+delta     273 -20
+gamma~\"'\"    273 75
+P[II]       290 150
+alpha     300 -40
+"), header=T, allowEscapes=TRUE)
+```
+```{r}
+# Later initializations from file
+initial.gmm = loadGMM("initial.model.tsv")
+
+initial.centroids = do.call(rbind, initial.gmm$mu) %>%
+  as.data.frame() %>%
+  transmute(Name=initial.gmm$name, phi=mu1, psi=mu2)
+pgd.all %>%
+  showClasses(initial.gmm) +
+  ggtitle("Initial Classifications")
+```
+
+
+# Gaussian Mixture Model
+
+Multivariate normal mixture model
+
+
+## Initial fast refinement with small dataset
+```{r}
+categories = c("alpha","beta","delta", "delta~\"'\"", "P[II]", "P[II]~\"'\"")
+categories = levels(initial.centroids$Name)
+categories = initial.gmm$name[initial.gmm$lambda > .05]
+
+n = 10000
+
+#data.frame(name=initial.gmm$name, lambda=initial.gmm$lambda) %>% top_n(5,lambda)
+x = pgd.all %>%
+  transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)) %>%
+  #filter(AA != "Gly") %>%
+  select(phi,psi) %>%
+  sample_n(n) %>%
+  as.matrix
+
+# 20 iter of 10000 points: 1523.276   80.171 1651.552 
+system.time(
+  gmm.small <- mvnormalmixEM(x, mu=initial.gmm$mu[initial.gmm$name %in% categories],
+                             sigma=initial.gmm$sigma[initial.gmm$name %in% categories],
+                             arbvar=TRUE,
+                             epsilon=.5, maxit=20)
+)
+```
+```{r}
+gmm.small$name = categories
+saveGMM(gmm.small, paste0("model_",n,".tsv")) %>% invisible()
+```
+
+Check convergence:
+```{r}
+plot(gmm.small,ylim=c(min(gmm.small$all.loglik[-1]),max(gmm.small$all.loglik)))
+```
+
+```{r,eval=F, include=F}
+ggplot(data.frame(Iteration=1:length(gmm.small$all.loglik),loglik=gmm.small$all.loglik),
+       aes(x=Iteration, y=-loglik)) +
+  ylim(min(-gmm.small$all.loglik[-1]),max(-gmm.small$all.loglik[-1])) +
+  #coord_trans(y = "log10")+
+  geom_line(na.rm = T)
+
+```
+
+```{r}
+showClasses(gmm.small$x, gmm.small) +
+  ggtitle("First round classifications")
+
+```
+
+Redo with larger dataset starting with rough estimates
+```{r}
+x = pgd.all %>%
+  transmute(phi=wrap.phi(phi), psi=wrap.psi(psi)) %>%
+  #filter(AA != "Gly") %>%
+  select(phi,psi) %>%
+  as.matrix
+
+system.time(
+  gmm.full <- mvnormalmixEM(x, mu=gmm.small$mu, sigma=gmm.small$sigma, arbvar=TRUE, epsilon=.5, maxit=10)
+)
+```
+```{r}
+gmm.full$name = categories
+saveGMM(gmm.full, paste0("model_full.tsv")) %>% invisible()
+```
+
+Check convergence again:
+```{r}
+plot(gmm.full, ylim=c(min(gmm.full$all.loglik[-1]),max(gmm.full$all.loglik)))
+```
+```{r}
+showClasses(gmm.full$x, gmm.full) +
+  ggtitle("Final round classifications")
+```
+
+## Helices
+
+Parameters for core $\alpha$ region:
+
+```{r}
+alpha.i = which.max(gmm.full$lambda)
+alpha.mu = gmm.full$mu[[alpha.i]]
+alpha.sigma = gmm.full$sigma[[alpha.i]]
+alpha.lambda = gmm.full$lambda[[alpha.i]]
+
+list(lambda=alpha.lambda, mu=alpha.mu, sigma=alpha.sigma)
+```
+
+Probability of some 'H' residues from the dataset
+```{r}
+# integrated probability over region
+#pmvnorm(upper=c(300,-50), mean=alpha.mu, sigma=alpha.sigma)
+pgd.all %>%
+  mutate(prob_helix=gmm.full$posterior[,alpha.i]) %>%
+  #filter(ss=="H") %>%
+  #sample_n(10) %>%
+  #select(prob_helix) %>%
+  ggplot(aes(x=prob_helix, fill=ss)) +
+  geom_histogram(aes(y=..density..), bins=30) +
+  ggtitle("Alpha Probability by secondary structure annotation")
+```
+
+
+```{r}
+# integrated probability over region
+#pmvnorm(upper=c(300,-50), mean=alpha.mu, sigma=alpha.sigma)
+pgd.all %>%
+  mutate(prob_helix=gmm.full$posterior[,gmm.full$name == "delta"]) %>%
+  #filter(ss=="H") %>%
+  #sample_n(10) %>%
+  #select(prob_helix) %>%
+  ggplot(aes(x=prob_helix, fill=ss)) +
+  geom_histogram(aes(y=..density..), bins=30) +
+  ggtitle("Delta Probability by secondary structure annotation")
+```
+
+
+
+# Debugging stuff
+
+How are posterior probabilities calculated? From the model we know that for class $C$ the probability of position $x=(\phi,\psi)$ is $P(x | C) = f_\mathcal{N}(x, \mu_C, \Sigma_C)$. So inverting this we should get
+
+$$
+\begin{aligned}
+P(C | x) &= \frac{P(x | C) P(C)}{P(x)} \\
+&= \frac{ \lambda_C f_\mathcal{N}(x, \mu_C, \Sigma_C) }{
+  \sum_C \lambda_C f_\mathcal{N}(x, \mu_C, \Sigma_C)
+}
+
+\end{aligned}
+$$
+
+
+```{r}
+# posterior, as Nxd matrix
+post = mvnormalmix.posterior(gmm.small$x, gmm.small)
+# Convert to data frame and pair with the posterior from mixtools
+post.lib = as.data.frame(gmm.small$posterior)
+colnames(post.lib) =colnames(post)
+comparison = melt(post.lib,id=c(),variable.name = "class", value.name = "library" ) %>%
+  cbind(melt(as.data.frame(post),id=c(),variable.name = "class", value.name = "calculated" ) %>%
+          select(calculated)) %>%
+  tbl_df
+
+ggplot(comparison, aes(x=library, y=calculated-library, color=class)) +
+  geom_point(size=.1) +
+  theme_bw() +
+  scale_colour_discrete(labels = parse(text=levels(comparison$class)), breaks=levels(comparison$class)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+```{r}
+rx = rmvnormmix.var(10000, gmm.full)
+probs = dmvnormmix(rx, gmm.full)
+data.frame(phi=rx[,1], psi=rx[,2], probs=probs) %>%
+  ggplot(aes(x=phi,y=psi,color=probs)) +
+  geom_point(size=.1)
+```
+
+```{r}
+#probs = dmvnormmix(gmm.full$x, gmm.full)
+data.frame(index=1:length(probs),probability=sort(probs)) %>%
+  ggplot(aes(x=index/length(probs),y=cumsum(probability))) +
+  #scale_x_log10() + scale_y_log10() +
+  geom_abline(slope=1, color="red", alpha=.5) +
+  geom_line()
+```
+
