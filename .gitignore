@@ -6,6 +6,7 @@
 
 *.html
 *.pdf
+!Ramachandran_model.pdf
 *_cache
 *_files
 
